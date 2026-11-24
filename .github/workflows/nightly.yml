@@ -1,0 +1,110 @@
+# Builds WiiStation from xjsxjs197/WiiSXRX_2022's newest commit, once a day when there is
+# one, and publishes it as a release with its own tag (nightly-<date>-<commit>),
+# for the Rift Store, RiftWii's homebrew store (https://github.com/RiftWii/apps). A tag is never
+# moved: the store pins each build by its checksum. Each release carries the
+# exact source it was built from (GPL).
+name: Nightly
+
+on:
+  schedule:
+    - cron: "23 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.upstream.outputs.sha }}
+      tag: ${{ steps.upstream.outputs.tag }}
+      build: ${{ steps.upstream.outputs.build }}
+    steps:
+      - id: upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha=$(git ls-remote https://github.com/xjsxjs197/WiiSXRX_2022.git refs/heads/main | cut -c1-40)
+          test -n "$sha"
+          short=${sha:0:7}
+          last=$(gh release list -R "$GITHUB_REPOSITORY" -L 1 --json tagName -q '.[0].tagName' 2>/dev/null || true)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "tag=nightly-$(date -u +%Y.%m.%d)-$short" >> "$GITHUB_OUTPUT"
+          if [ "${last##*-}" = "$short" ]; then
+            echo "Nothing new upstream since $last."
+            echo "build=no" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=yes" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: check
+    if: needs.check.outputs.build == 'yes'
+    runs-on: ubuntu-latest
+    container: devkitpro/devkitppc:20220821
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: xjsxjs197/WiiSXRX_2022
+          ref: ${{ needs.check.outputs.sha }}
+          path: src
+          submodules: recursive
+      - name: Build
+        run: |
+          cd src
+          command -v unzip || (apt-get update -qq && apt-get install -y -qq unzip zip)
+          unzip -q lightrec+Libogc2.zip -d "$RUNNER_TEMP/tc"
+          kit="$RUNNER_TEMP/tc/lightrec+Libogc2"
+          cp -r "$kit/libogc2" "$DEVKITPRO/"
+          cp "$kit/devkitPPC/base_rules" "$DEVKITPPC/"
+          cp -r "$kit/devkitPPC/powerpc-eabi/." "$DEVKITPPC/powerpc-eabi/"
+          make Wii_Release -j2
+      - name: Package
+        run: |
+          mkdir -p dist/apps/WiiStation dist/wiisxrx/controllers dist/wiisxrx/fonts
+          cp src/Gamecube/release/apps/WiiStation/* dist/apps/WiiStation/
+          cp "$(find src/Gamecube -maxdepth 2 -name WiiSXRX_Release.dol | head -n 1)" dist/apps/WiiStation/boot.dol
+          # Its pad layouts for USB controllers and its menu's fonts (the
+          # non-English ones are zipped in the source).
+          cp src/Gamecube/release/controllers/* dist/wiisxrx/controllers/
+          cp src/fonts/*.dat dist/wiisxrx/fonts/
+          for z in src/fonts/*.zip; do unzip -q -o "$z" -d dist/wiisxrx/fonts; done
+          ls -lR dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app
+          path: dist/
+
+  release:
+    needs: [check, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: app
+          path: dist
+      - uses: actions/checkout@v4
+        with:
+          repository: xjsxjs197/WiiSXRX_2022
+          ref: ${{ needs.check.outputs.sha }}
+          path: source
+          submodules: recursive
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.check.outputs.tag }}
+          SHA: ${{ needs.check.outputs.sha }}
+        run: |
+          (cd dist && zip -qr "../WiiStation-$TAG.zip" .)
+          rm -rf source/.git
+          tar -czf "source-$TAG.tar.gz" source
+          gh release create "$TAG" -R "$GITHUB_REPOSITORY" --prerelease --title "$TAG" \
+            --notes "WiiStation built from https://github.com/xjsxjs197/WiiSXRX_2022/commit/$SHA (its source is attached). Not an official release: a daily build for the Rift Store, RiftWii's homebrew store." \
+            "WiiStation-$TAG.zip" "source-$TAG.tar.gz"
+      - name: Keep the newest 10 builds
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release list -R "$GITHUB_REPOSITORY" -L 100 --json tagName -q '.[].tagName' | tail -n +11 |
+            while read -r old; do gh release delete "$old" -R "$GITHUB_REPOSITORY" --yes --cleanup-tag; done
