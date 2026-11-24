@@ -59,6 +59,11 @@ jobs:
           cp -r "$kit/libogc2" "$DEVKITPRO/"
           cp "$kit/devkitPPC/base_rules" "$DEVKITPPC/"
           cp -r "$kit/devkitPPC/powerpc-eabi/." "$DEVKITPPC/powerpc-eabi/"
+          # Its own SDL, not the image's (which the linker would find first).
+          cp libSDL.a "$DEVKITPRO/portlibs/wii/lib/libSDL.a"
+          # The Makefile asks for -lopengx; the file is libOpengx.a, which only
+          # a case-blind file system (Windows) finds.
+          ln -sf libOpengx.a deps/opengx/lib/libopengx.a
           make Wii_Release -j2
       - name: Package
         run: |
